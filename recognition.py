@@ -50,7 +50,7 @@ def match_faces(encodings, known_encodings, known_names, threshold=MATCH_THRESHO
     """Match detected face encodings against the known database.
 
     Uses face_distance (Euclidean distance in 128-d space) to find the
-    closest known face. Returns the name if under threshold, else "Unknown".
+    closest known face. Returns the name and confidence percentage.
 
     Args:
         encodings: List of 128-d encodings from the current frame.
@@ -59,22 +59,39 @@ def match_faces(encodings, known_encodings, known_names, threshold=MATCH_THRESHO
         threshold: Maximum distance to consider a match (default 0.6).
 
     Returns:
-        List of name strings — one per input encoding.
+        List of dicts: [{"name": str, "confidence": int, "distance": float}, ...]
     """
+    if not encodings:
+        return []
+
     if not known_encodings:
-        return ["Unknown"] * len(encodings)
+        return [{"name": "Unknown", "confidence": 0, "distance": 1.0} for _ in encodings]
 
     results = []
     for encoding in encodings:
         distances = face_recognition.face_distance(known_encodings, encoding)
-        best_idx = np.argmin(distances)
+        best_idx = int(np.argmin(distances))
+        best_distance = float(distances[best_idx])
 
-        if distances[best_idx] <= threshold:
-            results.append(known_names[best_idx])
+        # Convert distance to confidence percentage (0-100%)
+        # Distance 0.0 -> 100% confidence, Distance 0.6 -> ~50-60% confidence
+        confidence = max(0, min(99, int(round((1.0 - (best_distance / 1.2)) * 100))))
+
+        if best_distance <= threshold:
+            results.append({
+                "name": known_names[best_idx],
+                "confidence": max(50, confidence),
+                "distance": round(best_distance, 3)
+            })
         else:
-            results.append("Unknown")
+            results.append({
+                "name": "Unknown",
+                "confidence": confidence,
+                "distance": round(best_distance, 3)
+            })
 
     return results
+
 
 
 def load_encodings(path="encodings.pickle"):
