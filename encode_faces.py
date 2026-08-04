@@ -23,12 +23,19 @@ ENCODINGS_FILE = Path("encodings.pickle")
 
 
 def build_encodings():
-    """Scan known_faces/ and build the encodings database."""
+    """Scan known_faces/ and build the encodings database.
+
+    Returns:
+        tuple: (success: bool, message: str)
+    """
 
     if not KNOWN_FACES_DIR.exists():
-        print(f"Error: '{KNOWN_FACES_DIR}' directory not found.")
-        print("Create it and add sub-folders with person names containing their photos.")
-        sys.exit(1)
+        msg = f"'{KNOWN_FACES_DIR}' directory not found — no faces to encode."
+        print(msg)
+        # Remove stale pickle so old faces don't persist
+        if ENCODINGS_FILE.exists():
+            ENCODINGS_FILE.unlink()
+        return False, msg
 
     all_encodings = []
     all_names = []
@@ -38,9 +45,12 @@ def build_encodings():
     person_dirs = sorted([d for d in KNOWN_FACES_DIR.iterdir() if d.is_dir()])
 
     if not person_dirs:
-        print(f"Warning: No sub-folders found in '{KNOWN_FACES_DIR}/'.")
-        print("Add folders named after each person, containing their photos.")
-        sys.exit(1)
+        msg = f"No person folders found in '{KNOWN_FACES_DIR}/'. Cleared all encodings."
+        print(msg)
+        # Remove stale pickle so old faces don't persist
+        if ENCODINGS_FILE.exists():
+            ENCODINGS_FILE.unlink()
+        return False, msg
 
     total_images = 0
 
@@ -84,8 +94,9 @@ def build_encodings():
         total_images += count
 
     if total_images == 0:
-        print("\nError: No faces were successfully encoded.")
-        sys.exit(1)
+        msg = "Error: No faces were successfully encoded."
+        print(f"\n{msg}")
+        return False, msg
 
     # Save to pickle
     data = {"encodings": all_encodings, "names": all_names}
@@ -93,10 +104,15 @@ def build_encodings():
         pickle.dump(data, f)
 
     unique_names = sorted(set(all_names))
-    print(f"\n✓ Saved {total_images} encoding(s) for {len(unique_names)} person(s) to '{ENCODINGS_FILE}'")
+    msg = f"Saved {total_images} encoding(s) for {len(unique_names)} person(s) to '{ENCODINGS_FILE}'"
+    print(f"\n✓ {msg}")
     print(f"  People: {', '.join(unique_names)}")
+    return True, msg
 
 
 if __name__ == "__main__":
     print("Building face encodings...\n")
-    build_encodings()
+    success, message = build_encodings()
+    if not success:
+        sys.exit(1)
+
