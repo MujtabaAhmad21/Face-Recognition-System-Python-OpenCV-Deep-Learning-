@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Real-time face recognition system using deep learning embeddings — detect, encode, and match faces live from your webcam.">
+    <title>Face Recognition — Live Feed</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-left">
+                <div class="logo-icon">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 3H5a2 2 0 0 0-2 2v4"/>
+                        <path d="M15 3h4a2 2 0 0 1 2 2v4"/>
+                        <path d="M9 21H5a2 2 0 0 1-2-2v-4"/>
+                        <path d="M15 21h4a2 2 0 0 0 2-2v-4"/>
+                        <circle cx="12" cy="10" r="3"/>
+                        <path d="M7 16.5c0-2.5 2.2-4 5-4s5 1.5 5 4"/>
+                    </svg>
+                </div>
+                <h1>Face Recognition</h1>
+            </div>
+            <nav class="header-nav">
+                <a href="/" class="nav-link active">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"/>
+                        <circle cx="12" cy="12" r="3"/>
+                    </svg>
+                    Live Feed
+                </a>
+                <a href="/enroll" class="nav-link">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                        <circle cx="9" cy="7" r="4"/>
+                        <line x1="19" y1="8" x2="19" y2="14"/>
+                        <line x1="22" y1="11" x2="16" y2="11"/>
+                    </svg>
+                    Enroll
+                </a>
+                <a href="/people" class="nav-link">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                        <circle cx="9" cy="7" r="4"/>
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                        <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                    </svg>
+                    Manage
+                </a>
+            </nav>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <div class="video-section">
+                <div class="video-wrapper">
+                    <div class="video-badge live-badge">
+                        <span class="pulse-dot"></span>
+                        LIVE
+                    </div>
+                    <img id="video-feed" alt="Live camera feed with face recognition">
+                    <script>
+                        const videoImage = document.getElementById('video-feed');
+                        const videoStreamState = { active: false, stream: null, track: null, canvas: null, ctx: null, timer: null };
+
+                        async function startBrowserCamera() {
+                            if (videoStreamState.active) return;
+                            try {
+                                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+                                videoStreamState.stream = stream;
+                                videoStreamState.track = stream.getVideoTracks()[0];
+                                videoStreamState.canvas = document.createElement('canvas');
+                                videoStreamState.ctx = videoStreamState.canvas.getContext('2d');
+                                videoStreamState.active = true;
+
+                                const video = document.createElement('video');
+                                video.autoplay = true;
+                                video.playsInline = true;
+                                video.muted = true;
+                                video.srcObject = stream;
+                                await video.play();
+
+                                function captureFrame() {
+                                    if (!videoStreamState.active || !videoStreamState.ctx) return;
+                                    const width = 640;
+                                    const height = 480;
+                                    videoStreamState.canvas.width = width;
+                                    videoStreamState.canvas.height = height;
+                                    videoStreamState.ctx.drawImage(video, 0, 0, width, height);
+                                    const dataUrl = videoStreamState.canvas.toDataURL('image/jpeg', 0.85);
+                                    const base64 = dataUrl.split(',')[1];
+                                    const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+
+                                    const formData = new FormData();
+                                    formData.append('frame', new Blob([bytes], { type: 'image/jpeg' }), 'frame.jpg');
+                                    fetch('/upload_frame', { method: 'POST', body: formData })
+                                        .catch(() => {});
+
+                                    videoImage.src = dataUrl;
+                                }
+
+                                videoStreamState.timer = setInterval(captureFrame, 120);
+                            } catch (error) {
+                                console.error('Camera access failed', error);
+                                videoImage.src = '/video_frame?t=' + Date.now();
+                            }
+                        }
+
+                        async function stopBrowserCamera() {
+                            videoStreamState.active = false;
+                            if (videoStreamState.timer) clearInterval(videoStreamState.timer);
+                            if (videoStreamState.stream) {
+                                videoStreamState.stream.getTracks().forEach(track => track.stop());
+                            }
+                            videoStreamState.stream = null;
+                            videoStreamState.track = null;
+                        }
+
+                        document.addEventListener('visibilitychange', async () => {
+                            if (document.hidden) {
+                                await stopBrowserCamera();
+                            } else {
+                                await startBrowserCamera();
+                            }
+                        });
+
+                        window.addEventListener('pageshow', startBrowserCamera);
+                        startBrowserCamera();
+                    </script>
+                </div>
+            </div>
+
+            <aside class="info-panel">
+                <a href="/people" class="panel-card-link" title="Manage Known People">
+                    <div class="panel-card clickable-card">
+                        <div class="card-icon people-icon">
+                            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                                <circle cx="9" cy="7" r="4"/>
+                                <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                                <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                            </svg>
+                        </div>
+                        <div class="card-content">
+                            <span class="card-value" id="num-people">{{ num_people }}</span>
+                            <span class="card-label">Known People ➔</span>
+                        </div>
+                    </div>
+                </a>
+
+                <div class="panel-card">
+                    <div class="card-icon fps-icon">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                        </svg>
+                    </div>
+                    <div class="card-content">
+                        <span class="card-value" id="fps-value">—</span>
+                        <span class="card-label">Current FPS</span>
+                    </div>
+                </div>
+
+                <div class="panel-card">
+                    <div class="card-icon threshold-icon">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="4" y1="21" x2="4" y2="14"/>
+                            <line x1="4" y1="10" x2="4" y2="3"/>
+                            <line x1="12" y1="21" x2="12" y2="12"/>
+                            <line x1="12" y1="8" x2="12" y2="3"/>
+                            <line x1="20" y1="21" x2="20" y2="16"/>
+                            <line x1="20" y1="12" x2="20" y2="3"/>
+                            <line x1="1" y1="14" x2="7" y2="14"/>
+                            <line x1="9" y1="8" x2="15" y2="8"/>
+                            <line x1="17" y1="16" x2="23" y2="16"/>
+                        </svg>
+                    </div>
+                    <div class="card-content">
+                        <span class="card-value" id="threshold-value">0.6</span>
+                        <span class="card-label">Match Threshold</span>
+                    </div>
+                </div>
+
+                <a href="/enroll" class="enroll-button">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                        <circle cx="9" cy="7" r="4"/>
+                        <line x1="19" y1="8" x2="19" y2="14"/>
+                        <line x1="22" y1="11" x2="16" y2="11"/>
+                    </svg>
+                    Enroll New Person
+                </a>
+
+                <!-- Live Detections Section -->
+                <div class="pipeline-info live-detections-card">
+                    <h3>Live Recognized Faces</h3>
+                    <div id="detected-faces-list" class="detected-faces-list">
+                        <div class="no-faces-msg">No faces currently in view</div>
+                    </div>
+                </div>
+
+                <div class="pipeline-info">
+                    <h3>Pipeline</h3>
+                    <div class="pipeline-steps">
+                        <div class="pipeline-step">
+                            <div class="step-number">1</div>
+                            <div class="step-text">
+                                <strong>Detect</strong>
+                                <span>HOG face detector</span>
+                            </div>
+                        </div>
+                        <div class="pipeline-connector"></div>
+                        <div class="pipeline-step">
+                            <div class="step-number">2</div>
+                            <div class="step-text">
+                                <strong>Encode</strong>
+                                <span>128-d ResNet embedding</span>
+                            </div>
+                        </div>
+                        <div class="pipeline-connector"></div>
+                        <div class="pipeline-step">
+                            <div class="step-number">3</div>
+                            <div class="step-text">
+                                <strong>Match</strong>
+                                <span>Euclidean distance</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+        </main>
+    </div>
+
+    <script>
+        // Poll status endpoint to update FPS, people count, and live detected faces.
+        async function updateStatus() {
+            try {
+                const resp = await fetch('/status');
+                const data = await resp.json();
+                document.getElementById('fps-value').textContent = data.fps || '—';
+                document.getElementById('num-people').textContent = data.num_people;
+                document.getElementById('threshold-value').textContent = data.threshold;
+
+                const facesContainer = document.getElementById('detected-faces-list');
+                if (data.detected_faces && data.detected_faces.length > 0) {
+                    facesContainer.innerHTML = data.detected_faces.map(face => {
+                        if (face.name === 'Unknown') {
+                            return `
+                                <div class="detected-face-item unknown">
+                                    <div class="face-item-header">
+                                        <span class="face-name">Unknown Person</span>
+                                        <span class="face-badge-status warning">Unenrolled</span>
+                                    </div>
+                                    <div class="face-item-subtitle">Can't recognize face — please enroll</div>
+                                </div>
+                            `;
+                        } else {
+                            return `
+                                <div class="detected-face-item recognized">
+                                    <div class="face-item-header">
+                                        <span class="face-name">${face.name}</span>
+                                        <span class="face-badge-status success">${face.confidence}% Probability</span>
+                                    </div>
+                                    <div class="confidence-bar-bg">
+                                        <div class="confidence-bar-fill" style="width: ${face.confidence}%"></div>
+                                    </div>
+                                </div>
+                            `;
+                        }
+                    }).join('');
+                } else {
+                    facesContainer.innerHTML = '<div class="no-faces-msg">No faces currently in view</div>';
+                }
+            } catch (e) {
+                // Silently ignore fetch errors
+            }
+        }
+
+        setInterval(updateStatus, 800);
+        updateStatus();
+    </script>
+</body>
+</html>
+
