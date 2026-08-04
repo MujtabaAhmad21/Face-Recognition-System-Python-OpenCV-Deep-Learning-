@@ -16,14 +16,17 @@ import threading
 
 import io
 
-# On macOS, let AVFoundation request permission rather than skipping it by default.
-# If the environment already sets a value, we keep it; otherwise request auth.
+# On macOS, prevent OpenCV from requesting camera permission from a background thread.
+# This avoids the "can not spin main run loop from other thread" crash.
+# The user must have already granted terminal permission (e.g. by running test_camera.py).
 if sys.platform == "darwin":
-    os.environ.setdefault("OPENCV_AVFOUNDATION_SKIP_AUTH", "0")
+    os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "1"
+
+import shutil
 
 import cv2
 import numpy as np
-from flask import Flask, Response, render_template, request, jsonify
+from flask import Flask, Response, render_template, request, jsonify, send_from_directory
 from imutils.video import FPS
 from werkzeug.serving import make_server
 
@@ -94,6 +97,10 @@ def get_camera():
 # ---------------------------------------------------------------------------
 # Global state for recognition
 # ---------------------------------------------------------------------------
+# Always rebuild encodings from known_faces/ on startup so the pickle
+# never goes stale (e.g. after the user deletes image folders).
+from encode_faces import build_encodings as _initial_build
+_initial_build()  # regenerates encodings.pickle from current known_faces/
 known_encodings, known_names = load_encodings()
 print(f"Loaded {len(set(known_names))} known person(s) with {len(known_encodings)} encoding(s)")
 
@@ -103,8 +110,9 @@ frame_count = 0
 last_boxes = []      # (top, right, bottom, left) in full-res coords
 last_names = []      # matched names
 
-# FPS tracking
+# FPS tracking & timing
 fps_value = 0.0
+last_frame_time = time.time()
 
 # Latest frame for enrollment capture
 latest_frame = None
@@ -113,7 +121,7 @@ latest_frame_lock = threading.Lock()
 
 def annotate_frame(frame):
     """Run face detection and draw overlays on a frame in place."""
-    global frame_count, last_boxes, last_names, fps_value
+    global frame_count, last_boxes, last_names, fps_value, last_frame_time
 
     if frame is None:
         return None
@@ -140,28 +148,61 @@ def annotate_frame(frame):
         last_names = names
 
     # --- Draw boxes and names on the frame ---
-    for (top, right, bottom, left), name in zip(last_boxes, last_names):
-        if name == "Unknown":
-            color = (0, 0, 255)
+    for (top, right, bottom, left), match in zip(last_boxes, last_names):
+        if isinstance(match, dict):
+            name = match.get("name", "Unknown")
+            confidence = match.get("confidence", 0)
         else:
-            color = (0, 220, 100)
+            name = str(match)
+            confidence = 0
 
+        if name == "Unknown":
+            color = (0, 50, 240)  # Red-orange highlight for unrecognized
+            label = "Can't Recognize — Please Enroll"
+        else:
+            color = (0, 220, 100)  # Vibrant green highlight for recognized
+            label = f"{name} ({confidence}%)"
+
+        # Draw rounded bounding box
         cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-        label_h = 28
-        cv2.rectangle(frame, (left, bottom), (right, bottom + label_h), color, cv2.FILLED)
-        cv2.putText(frame, name, (left + 6, bottom + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+        # Label background box calculation
+        (label_width, label_height), baseline = cv2.getTextSize(
+            label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
+        )
+        label_y = max(top - 8, label_height + 8)
+
+        # Background rectangle for text contrast
+        cv2.rectangle(
+            frame,
+            (left, label_y - label_height - 6),
+            (left + label_width + 12, label_y + baseline),
+            color,
+            cv2.FILLED
+        )
+        # Text label
+        cv2.putText(
+            frame,
+            label,
+            (left + 6, label_y - 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA
+        )
 
     # --- FPS counter ---
     now = time.time()
-    dt = now - fps_value if hasattr(fps_value, '__float__') else 0.0
-    # keep a simple rolling FPS estimate without an extra timer
-    if frame_count % 5 == 0:
-        fps_value = 1.0 / max(dt, 0.001) if dt > 0 else fps_value
+    dt = now - last_frame_time
+    last_frame_time = now
+    if dt > 0:
+        current_fps = 1.0 / dt
+        fps_value = 0.85 * fps_value + 0.15 * current_fps if fps_value > 0 else current_fps
 
     fps_text = f"FPS: {fps_value:.1f}"
     cv2.putText(frame, fps_text, (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
     return frame
 
@@ -195,8 +236,6 @@ def generate_frames():
         yield (b"--frame\r\n"
                b"Content-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
         return
-
-    prev_time = time.time()
 
     while True:
         with camera_read_lock:
@@ -341,28 +380,132 @@ def enroll_submit():
     if saved_count == 0:
         return jsonify({"error": "No valid images saved"}), 400
 
-    # Re-build encodings
+    # Re-build encodings without sys.exit
     from encode_faces import build_encodings
-    build_encodings()
+    success, message = build_encodings()
+
+    if not success:
+        return jsonify({"error": f"Encoding failed: {message}"}), 400
 
     # Reload into memory
     known_encodings, known_names = load_encodings()
 
     return jsonify({
         "success": True,
-        "message": f"Enrolled {name} with {saved_count} image(s). Recognition updated!"
+        "message": f"Enrolled '{name}' with {saved_count} photo(s). System updated!"
     })
 
 
 @app.route("/status")
 def status():
-    """API endpoint for current status info."""
+    """API endpoint for current status info and live detected faces."""
+    active_faces = []
+    for match in last_names:
+        if isinstance(match, dict):
+            active_faces.append(match)
+        else:
+            active_faces.append({"name": str(match), "confidence": 0, "distance": 1.0})
+
     return jsonify({
         "num_people": len(set(known_names)) if known_names else 0,
         "num_encodings": len(known_encodings),
         "fps": round(fps_value, 1),
         "threshold": MATCH_THRESHOLD,
+        "detected_faces": active_faces
     })
+
+
+@app.route("/people", methods=["GET"])
+def people_page():
+    """Page for viewing and managing enrolled people."""
+    return render_template("people.html")
+
+
+@app.route("/api/people", methods=["GET"])
+def api_get_people():
+    """Return JSON list of all enrolled people and their photos."""
+    known_faces_dir = os.path.join(os.path.dirname(__file__), "known_faces")
+    if not os.path.exists(known_faces_dir):
+        return jsonify({"people": []})
+
+    image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    people = []
+
+    for item in sorted(os.listdir(known_faces_dir)):
+        person_dir = os.path.join(known_faces_dir, item)
+        if os.path.isdir(person_dir):
+            photos = sorted([
+                f for f in os.listdir(person_dir)
+                if os.path.splitext(f)[1].lower() in image_extensions
+            ])
+            people.append({
+                "name": item,
+                "num_photos": len(photos),
+                "photos": photos
+            })
+
+    return jsonify({"people": people})
+
+
+@app.route("/api/people/<name>/photo/<filename>", methods=["GET"])
+def api_get_person_photo(name, filename):
+    """Serve a specific photo of an enrolled person."""
+    known_faces_dir = os.path.join(os.path.dirname(__file__), "known_faces")
+    person_dir = os.path.join(known_faces_dir, name)
+    if not os.path.exists(person_dir):
+        return jsonify({"error": "Person not found"}), 404
+    return send_from_directory(person_dir, filename)
+
+
+@app.route("/api/people/<name>", methods=["DELETE"])
+def api_delete_person(name):
+    """Delete an enrolled person and instantly update encodings in memory at runtime."""
+    global known_encodings, known_names, last_boxes, last_names
+
+    known_faces_dir = os.path.join(os.path.dirname(__file__), "known_faces")
+    person_dir = os.path.join(known_faces_dir, name)
+
+    if not os.path.exists(person_dir):
+        return jsonify({"error": f"Person '{name}' not found"}), 404
+
+    try:
+        shutil.rmtree(person_dir)
+    except Exception as exc:
+        return jsonify({"error": f"Failed to delete directory: {exc}"}), 500
+
+    # Rebuild encodings immediately
+    from encode_faces import build_encodings
+    build_encodings()
+
+    # Reload encodings into memory state
+    known_encodings, known_names = load_encodings()
+    last_boxes = []
+    last_names = []
+
+    return jsonify({
+        "success": True,
+        "message": f"Successfully deleted '{name}'. Model updated in real-time!",
+        "num_people": len(set(known_names)) if known_names else 0
+    })
+
+
+@app.route("/refresh", methods=["POST"])
+def refresh_encodings():
+    """Force-rebuild encodings from known_faces/ and reload into memory."""
+    global known_encodings, known_names, last_boxes, last_names
+    from encode_faces import build_encodings
+    success, message = build_encodings()
+    known_encodings, known_names = load_encodings()
+    last_boxes = []
+    last_names = []
+    return jsonify({
+        "success": True,
+        "num_people": len(set(known_names)) if known_names else 0,
+        "num_encodings": len(known_encodings),
+        "message": message
+    })
+
+
 
 
 def start_server(preferred_port=5001, max_attempts=10):
