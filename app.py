@@ -114,6 +114,12 @@ last_names = []      # matched names
 fps_value = 0.0
 last_frame_time = time.time()
 
+# Persistent face detection state: retains last successful detections across
+# page navigations so predictions don't disappear.  Only updated when faces
+# ARE actually detected — never auto-expires.
+last_known_faces = []       # list of dicts: [{name, confidence, distance}, ...]
+last_detection_time = 0.0   # timestamp of the most recent annotate_frame detection run
+
 # Latest frame for enrollment capture
 latest_frame = None
 latest_frame_lock = threading.Lock()
@@ -146,6 +152,22 @@ def annotate_frame(frame):
             for (top, right, bottom, left) in locations
         ]
         last_names = names
+
+        # Persist non-empty detections so they survive page navigations
+        global last_known_faces, last_detection_time
+        last_detection_time = time.time()
+        face_list = []
+        for match in names:
+            if isinstance(match, dict):
+                face_list.append({
+                    "name": match.get("name", "Unknown"),
+                    "confidence": match.get("confidence", 0),
+                    "distance": match.get("distance", 1.0),
+                })
+            else:
+                face_list.append({"name": str(match), "confidence": 0, "distance": 1.0})
+        if face_list:
+            last_known_faces = face_list
 
     # --- Draw boxes and names on the frame ---
     for (top, right, bottom, left), match in zip(last_boxes, last_names):
@@ -264,7 +286,14 @@ def generate_frames():
 def index():
     """Main page with live video feed."""
     num_people = len(set(known_names)) if known_names else 0
-    return render_template("index.html", num_people=num_people)
+    current_fps = round(fps_value, 1) if fps_value > 0 else "—"
+    return render_template(
+        "index.html",
+        num_people=num_people,
+        fps=current_fps,
+        threshold=MATCH_THRESHOLD,
+        last_faces=last_known_faces
+    )
 
 
 @app.route("/video_feed")
@@ -399,19 +428,38 @@ def enroll_submit():
 @app.route("/status")
 def status():
     """API endpoint for current status info and live detected faces."""
+    now = time.time()
+    time_since = now - last_detection_time if last_detection_time else 999
+    is_camera_live = time_since < 2.0
+
     active_faces = []
-    for match in last_names:
-        if isinstance(match, dict):
-            active_faces.append(match)
-        else:
-            active_faces.append({"name": str(match), "confidence": 0, "distance": 1.0})
+    # If camera is actively detecting faces in the current frame, return them
+    if is_camera_live and last_names:
+        for match in last_names:
+            if isinstance(match, dict):
+                active_faces.append({
+                    "name": match.get("name", "Unknown"),
+                    "confidence": match.get("confidence", 0),
+                    "distance": match.get("distance", 1.0),
+                    "is_live": True,
+                })
+            else:
+                active_faces.append({
+                    "name": str(match), "confidence": 0,
+                    "distance": 1.0, "is_live": True,
+                })
+    elif last_known_faces:
+        # If camera has a gap between detections or user navigated back, retain last known faces
+        for face in last_known_faces:
+            active_faces.append({**face, "is_live": False})
 
     return jsonify({
         "num_people": len(set(known_names)) if known_names else 0,
         "num_encodings": len(known_encodings),
-        "fps": round(fps_value, 1),
+        "fps": round(fps_value, 1) if fps_value > 0 else "—",
         "threshold": MATCH_THRESHOLD,
-        "detected_faces": active_faces
+        "detected_faces": active_faces,
+        "camera_active": is_camera_live,
     })
 
 
